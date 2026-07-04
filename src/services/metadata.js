@@ -1,6 +1,6 @@
 const UNAVAILABLE_PRICE = 'Preço indisponível';
 const UNAVAILABLE_DESCRIPTION = 'Descrição indisponível.';
-const REQUEST_TIMEOUT = 12000;
+const REQUEST_TIMEOUT = 9000;
 
 export async function extractItemMetadata(url) {
   const normalizedUrl = normalizeUrl(url);
@@ -69,11 +69,11 @@ function detectMarketplace(url) {
 async function fetchMarketplaceApi(url, marketplace) {
   try {
     if (marketplace === 'mercadolivre') {
-      return fetchMercadoLivreApi(url);
+      return await fetchMercadoLivreApi(url);
     }
 
     if (marketplace === 'shopee') {
-      return fetchShopeeApi(url);
+      return await fetchShopeeApi(url);
     }
   } catch {
     return null;
@@ -90,11 +90,6 @@ async function fetchMercadoLivreApi(url) {
   }
 
   const headers = { accept: 'application/json' };
-  const token = import.meta.env.VITE_MERCADO_LIVRE_ACCESS_TOKEN;
-
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
 
   const item = await fetchJson(`https://api.mercadolibre.com/items/${itemId}`, { headers });
 
@@ -151,21 +146,27 @@ async function fetchReadableDocuments(url) {
     {
       kind: 'markdown',
       url: `https://r.jina.ai/http://${encodedUrl}`,
+      timeout: 9000,
     },
     {
       kind: 'html',
       url: `https://r.jina.ai/http://${encodedUrl}`,
       headers: { 'x-return-format': 'html' },
+      timeout: 9000,
     },
     {
       kind: 'html',
       url: `https://api.allorigins.win/raw?url=${encodedUrl}`,
+      timeout: 4500,
     },
   ];
 
   const results = await Promise.allSettled(
     documentRequests.map(async (request) => {
-      const text = await fetchText(request.url, { headers: request.headers });
+      const text = await fetchText(request.url, {
+        headers: request.headers,
+        timeout: request.timeout,
+      });
       return {
         kind: request.kind,
         text,
@@ -285,7 +286,7 @@ function parseMetaMetadata(html) {
     title,
     description,
     imageUrl,
-    price: formatMarketplacePrice(rawPrice, currency) || findPrice(rawPrice),
+    price: findPrice(rawPrice) || formatMarketplacePrice(rawPrice, currency),
   });
 }
 
@@ -407,6 +408,7 @@ function extractTitleFromUrl(url) {
 
   return cleanText(
     source
+      .replace(/^MLB-?\d+-?/i, '')
       .replace(/-i\.\d+\.\d+.*$/i, '')
       .replace(/_JM$/i, '')
       .replace(/\.[a-z0-9]+$/i, '')
@@ -478,7 +480,7 @@ function findDescriptionFromText(text) {
   const lines = stripHtml(text)
     .split('\n')
     .map((line) => cleanText(line))
-    .filter((line) => isUsefulText(line) && line.length > 24 && !findPrice(line));
+    .filter((line) => isUsefulText(line) && !isTechnicalLine(line) && line.length > 24 && !findPrice(line));
 
   return lines[0] || '';
 }
@@ -525,7 +527,7 @@ function formatMarketplacePrice(value, currency = 'BRL') {
 
   const numberValue = typeof value === 'number'
     ? value
-    : Number(String(value).replace(',', '.').replace(/[^\d.-]/g, ''));
+    : parsePriceNumber(value);
 
   if (!Number.isFinite(numberValue)) {
     return cleanPrice(value);
@@ -539,6 +541,50 @@ function formatMarketplacePrice(value, currency = 'BRL') {
   }
 
   return `${currency || ''} ${numberValue.toFixed(2)}`.trim();
+}
+
+function parsePriceNumber(value) {
+  const cleaned = String(value)
+    .trim()
+    .replace(/\s/g, '')
+    .replace(/[^\d.,-]/g, '');
+
+  if (!cleaned) {
+    return Number.NaN;
+  }
+
+  const commaIndex = cleaned.lastIndexOf(',');
+  const dotIndex = cleaned.lastIndexOf('.');
+  let normalized = cleaned;
+
+  if (commaIndex > -1 && dotIndex > -1) {
+    const decimalSeparator = commaIndex > dotIndex ? ',' : '.';
+    const thousandsSeparator = decimalSeparator === ',' ? '.' : ',';
+    normalized = cleaned
+      .replace(new RegExp(`\\${thousandsSeparator}`, 'g'), '')
+      .replace(decimalSeparator, '.');
+  } else if (commaIndex > -1) {
+    normalized = normalizeSingleSeparator(cleaned, ',');
+  } else if (dotIndex > -1) {
+    normalized = normalizeSingleSeparator(cleaned, '.');
+  }
+
+  return Number(normalized);
+}
+
+function normalizeSingleSeparator(value, separator) {
+  const parts = value.split(separator);
+  const lastPart = parts.at(-1) || '';
+
+  if (parts.length === 2 && lastPart.length > 0 && lastPart.length <= 2) {
+    return value.replace(separator, '.');
+  }
+
+  if (parts.length > 1) {
+    return parts.join('');
+  }
+
+  return value;
 }
 
 function resolveShopeePrice(item) {
@@ -644,12 +690,13 @@ async function fetchText(url, options = {}) {
 }
 
 async function fetchWithTimeout(url, options = {}) {
+  const { timeout = REQUEST_TIMEOUT, ...fetchOptions } = options;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
     return await fetch(url, {
-      ...options,
+      ...fetchOptions,
       signal: controller.signal,
     });
   } finally {
@@ -659,4 +706,28 @@ async function fetchWithTimeout(url, options = {}) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isTechnicalLine(value) {
+  const lower = cleanText(value).toLowerCase();
+
+  return [
+    'published time:',
+    'warning:',
+    'url source:',
+    'markdown content:',
+    'this is a cached snapshot',
+    'consider explicitly specify a timeout',
+    'skip to content',
+    'accessibility feedback',
+    'privacy policy',
+    'terms of use',
+    'usamos cookies',
+    'central de privacidade',
+    'aceitar cookies',
+    'configurar cookies',
+    'pronto! suas preferências',
+    'ocorreu um erro',
+    'trace-id:',
+  ].some((phrase) => lower.includes(phrase));
 }
