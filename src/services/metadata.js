@@ -8,6 +8,11 @@ export async function extractItemMetadata(url) {
   const fallback = buildFallbackMetadata(normalizedUrl, marketplace);
   const candidates = [fallback];
 
+  const cloudCandidate = await fetchCloudScraper(normalizedUrl);
+  if (cloudCandidate) {
+    candidates.push(cloudCandidate);
+  }
+
   const apiCandidate = await fetchMarketplaceApi(normalizedUrl, marketplace);
   if (apiCandidate) {
     candidates.push(apiCandidate);
@@ -80,6 +85,38 @@ async function fetchMarketplaceApi(url, marketplace) {
   }
 
   return null;
+}
+
+async function fetchCloudScraper(url) {
+  const scraperUrl = getCloudScraperUrl();
+
+  if (!scraperUrl) {
+    return null;
+  }
+
+  try {
+    const response = await fetchWithTimeout(scraperUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ url }),
+      timeout: 15000,
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const json = await response.json();
+    return json?.metadata ? cleanCandidate(json.metadata) : null;
+  } catch {
+    return null;
+  }
+}
+
+function getCloudScraperUrl() {
+  return import.meta.env.VITE_SCRAPER_FUNCTION_URL || '';
 }
 
 async function fetchMercadoLivreApi(url) {
